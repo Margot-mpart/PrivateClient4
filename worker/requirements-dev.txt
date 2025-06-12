@@ -1,0 +1,76 @@
+# PCC Platform - Worker Development Requirements
+# Additional dependencies for local development and testing of worker service
+
+# Include production dependencies
+-r requirements.txt
+
+# Testing
+pytest==7.4.2
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.11.1
+pytest-xdist==3.3.1  # Parallel testing
+pytest-env==1.0.1  # Environment variable handling
+pytest-sugar==0.9.7  # Test progress visualization
+pytest-timeout==2.1.0  # Test timeouts
+pytest-celery==0.0.0  # Celery task testing
+pytest-randomly==3.15.0  # Randomize test order
+faker==19.6.2  # Test data generation
+factory-boy==3.3.0  # Test factories
+hypothesis==6.82.6  # Property-based testing
+
+# Linting & Formatting
+black==23.9.1  # Code formatter
+isort==5.12.0  # Import sorter
+flake8==6.1.0  # Linter
+flake8-bugbear==23.9.16  # Additional linting rules
+flake8-comprehensions==3.14.0  # List/dict comprehension linting
+flake8-docstrings==1.7.0  # Docstring linting
+flake8-quotes==3.3.2  # Quote style linting
+pep8-naming==0.13.3  # PEP8 naming conventions
+
+# Type checking
+mypy==1.5.1
+types-python-dateutil==2.8.19.14
+types-requests==2.31.0.2
+types-redis==4.6.0.5  # Redis type stubs
+types-PyYAML==6.0.12.11
+
+# Security testing
+bandit==1.7.5  # Security linting
+safety==2.3.5  # Dependency vulnerability checking
+
+# Documentation
+mkdocs==1.5.3
+mkdocs-material==9.3.1
+mkdocstrings[python]==0.23.0
+
+# Debugging
+debugpy==1.8.0  # Remote debugging
+ipython==8.15.0  # Enhanced REPL
+rich==13.5.3  # Better tracebacks and pretty printing
+
+# Development tools
+watchfiles==0.20.0  # File watching for auto-reload
+pre-commit==3.4.0  # Git hooks
+pip-tools==7.3.0  # Dependency management
+
+# Database tools
+mongomock==4.1.2  # MongoDB mocking for tests
+
+# Task queue testing
+pytest-celery==0.0.0  # Celery testing
+fakeredis==2.18.1  # Redis mocking
+
+# AI/ML development tools
+datasets==2.14.5  # Hugging Face datasets
+evaluate==0.4.1  # Model evaluation
+tensorboard==2.14.1  # Visualization for ML training
+gradio==3.50.2  # UI for testing ML models
+
+# Performance testing
+locust==2.16.1  # Load testing
+
+# Profiling
+pyinstrument==4.6.0  # Profiler for Python code
+memory-profiler==0.61.0  # Memory profiling
