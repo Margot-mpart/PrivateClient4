@@ -1,0 +1,307 @@
+# PCC Platform - Cloud Build CI/CD Configuration
+# This file defines the CI/CD pipeline for the PCC Platform
+# Triggered on push to main branch or via manual trigger
+
+timeout: 2700s  # 45 minutes
+options:
+  machineType: 'E2_HIGHCPU_8'  # 8 vCPUs for faster builds
+  
+# Define substitution variables with defaults
+substitutions:
+  _REGION: 'us-central1'
+  _REPO_NAME: 'pcc-repo'
+  _FE_SERVICE_NAME: 'pcc-fe'
+  _API_SERVICE_NAME: 'pcc-api'
+  _WORKER_SERVICE_NAME: 'pcc-worker'
+  _SERVICE_ACCOUNT: 'pcc-runner'
+  _MIN_INSTANCES: '0'
+  _MAX_INSTANCES: '10'
+  _MEMORY: '1Gi'
+  _CPU: '1'
+  _APP_ENV: 'production'  # Override with 'staging' for non-main branches
+
+# Define reusable artifacts
+artifacts:
+  objects:
+    location: 'gs://${PROJECT_ID}-cloudbuild-artifacts/'
+    paths: ['reports/**/*', 'coverage/**/*']
+
+# Define build steps
+steps:
+  # Step 1: Install dependencies and run frontend tests
+  - name: 'node:20-alpine'
+    id: 'frontend-test'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd frontend
+        echo "Installing frontend dependencies..."
+        npm ci
+        echo "Running frontend linting..."
+        npm run lint
+        echo "Running frontend tests..."
+        npm test -- --coverage
+        echo "Building frontend for testing..."
+        npm run build
+    waitFor: ['-']  # Start immediately
+
+  # Step 2: Run backend API tests
+  - name: 'python:3.11-slim'
+    id: 'api-test'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd backend
+        echo "Installing API dependencies..."
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        echo "Running API tests..."
+        pytest -xvs --cov=app --cov-report=xml:coverage/coverage.xml tests/
+        echo "Running API linting..."
+        flake8 app tests
+        mypy app
+    waitFor: ['-']  # Start immediately
+
+  # Step 3: Run worker tests
+  - name: 'python:3.11-slim'
+    id: 'worker-test'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd worker
+        echo "Installing worker dependencies..."
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        echo "Running worker tests..."
+        pytest -xvs --cov=app --cov-report=xml:coverage/coverage.xml tests/
+        echo "Running worker linting..."
+        flake8 app tests
+        mypy app
+    waitFor: ['-']  # Start immediately
+
+  # Step 4: Security scan (OWASP dependency check)
+  - name: 'owasp/dependency-check'
+    id: 'security-scan'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        /usr/share/dependency-check/bin/dependency-check.sh \
+          --scan . \
+          --project "PCC Platform" \
+          --out reports/dependency-check \
+          --format "ALL"
+    waitFor: ['-']  # Start immediately
+
+  # Step 5: Set up Artifact Registry
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'setup-artifact-registry'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Setting up Artifact Registry..."
+        gcloud artifacts repositories describe ${_REPO_NAME} \
+          --location=${_REGION} || \
+        gcloud artifacts repositories create ${_REPO_NAME} \
+          --repository-format=docker \
+          --location=${_REGION} \
+          --description="PCC Platform container repository"
+    waitFor: ['-']  # Start immediately
+
+  # Step 6: Build and push frontend image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-frontend'
+    args: [
+      'build',
+      '-t', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_FE_SERVICE_NAME}:${SHORT_SHA}',
+      '-t', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_FE_SERVICE_NAME}:latest',
+      '--build-arg', 'APP_ENV=${_APP_ENV}',
+      '-f', 'frontend/Dockerfile',
+      '.'
+    ]
+    waitFor: ['frontend-test', 'setup-artifact-registry']
+
+  # Step 7: Build and push API image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-api'
+    args: [
+      'build',
+      '-t', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_API_SERVICE_NAME}:${SHORT_SHA}',
+      '-t', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_API_SERVICE_NAME}:latest',
+      '--build-arg', 'APP_ENV=${_APP_ENV}',
+      '-f', 'backend/Dockerfile',
+      '.'
+    ]
+    waitFor: ['api-test', 'setup-artifact-registry']
+
+  # Step 8: Build and push worker image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-worker'
+    args: [
+      'build',
+      '-t', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_WORKER_SERVICE_NAME}:${SHORT_SHA}',
+      '-t', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_WORKER_SERVICE_NAME}:latest',
+      '--build-arg', 'APP_ENV=${_APP_ENV}',
+      '-f', 'worker/Dockerfile',
+      '.'
+    ]
+    waitFor: ['worker-test', 'setup-artifact-registry']
+
+  # Step 9: Push all images to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-images'
+    args: ['push', '--all-tags', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_FE_SERVICE_NAME}']
+    waitFor: ['build-frontend']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_API_SERVICE_NAME}']
+    waitFor: ['build-api']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_WORKER_SERVICE_NAME}']
+    waitFor: ['build-worker']
+
+  # Step 10: Deploy frontend to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'deploy-frontend'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run deploy ${_FE_SERVICE_NAME} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_FE_SERVICE_NAME}:${SHORT_SHA} \
+          --region=${_REGION} \
+          --platform=managed \
+          --port=80 \
+          --service-account=${_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com \
+          --memory=${_MEMORY} \
+          --cpu=${_CPU} \
+          --concurrency=80 \
+          --timeout=300s \
+          --min-instances=${_MIN_INSTANCES} \
+          --max-instances=${_MAX_INSTANCES} \
+          --cpu-boost=true \
+          --set-secrets=APP_ENV=app-env:latest,API_URL=api-url:latest \
+          --allow-unauthenticated
+        
+        # Store frontend URL in Secret Manager
+        FRONTEND_URL=$(gcloud run services describe ${_FE_SERVICE_NAME} --region=${_REGION} --format='value(status.url)')
+        echo -n "$FRONTEND_URL" | gcloud secrets versions add frontend-url --data-file=- || \
+          echo -n "$FRONTEND_URL" | gcloud secrets create frontend-url --replication-policy=automatic --data-file=-
+    waitFor: ['push-images']
+
+  # Step 11: Deploy API to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'deploy-api'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run deploy ${_API_SERVICE_NAME} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_API_SERVICE_NAME}:${SHORT_SHA} \
+          --region=${_REGION} \
+          --platform=managed \
+          --port=8000 \
+          --service-account=${_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com \
+          --memory=${_MEMORY} \
+          --cpu=${_CPU} \
+          --concurrency=30 \
+          --timeout=300s \
+          --min-instances=1 \
+          --max-instances=${_MAX_INSTANCES} \
+          --cpu-boost=true \
+          --set-secrets=APP_ENV=app-env:latest,MONGODB_URI=mongodb-uri:latest,JWT_SECRET=jwt-secret:latest,STRIPE_SECRET_KEY=stripe-secret-key:latest,FRONTEND_URL=frontend-url:latest \
+          --allow-unauthenticated
+        
+        # Store API URL in Secret Manager
+        API_URL=$(gcloud run services describe ${_API_SERVICE_NAME} --region=${_REGION} --format='value(status.url)')
+        echo -n "$API_URL" | gcloud secrets versions add api-url --data-file=- || \
+          echo -n "$API_URL" | gcloud secrets create api-url --replication-policy=automatic --data-file=-
+    waitFor: ['push-images']
+
+  # Step 12: Deploy worker to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'deploy-worker'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run deploy ${_WORKER_SERVICE_NAME} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_WORKER_SERVICE_NAME}:${SHORT_SHA} \
+          --region=${_REGION} \
+          --platform=managed \
+          --port=8080 \
+          --service-account=${_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com \
+          --memory=${_MEMORY} \
+          --cpu=${_CPU} \
+          --concurrency=10 \
+          --timeout=300s \
+          --min-instances=${_MIN_INSTANCES} \
+          --max-instances=${_MAX_INSTANCES} \
+          --cpu-boost=false \
+          --set-secrets=APP_ENV=app-env:latest,MONGODB_URI=mongodb-uri:latest,JWT_SECRET=jwt-secret:latest,OPENAI_API_KEY=openai-api-key:latest \
+          --allow-unauthenticated
+    waitFor: ['push-images']
+
+  # Step 13: Run integration tests against deployed services
+  - name: 'python:3.11-slim'
+    id: 'integration-tests'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        cd tests/integration
+        pip install -r requirements.txt
+        
+        # Get service URLs from Secret Manager
+        API_URL=$(gcloud secrets versions access latest --secret=api-url)
+        FRONTEND_URL=$(gcloud secrets versions access latest --secret=frontend-url)
+        
+        # Run integration tests
+        echo "Running integration tests against deployed services..."
+        pytest -xvs --api-url=$API_URL --frontend-url=$FRONTEND_URL
+    waitFor: ['deploy-frontend', 'deploy-api', 'deploy-worker']
+
+  # Step 14: Send notification on completion
+  - name: 'gcr.io/cloud-builders/curl'
+    id: 'notify-completion'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Extract branch name
+        BRANCH_NAME=${BRANCH_NAME:-main}
+        
+        # Create notification message
+        MESSAGE="PCC Platform deployment completed successfully!
+        Project: ${PROJECT_ID}
+        Branch: ${BRANCH_NAME}
+        Commit: ${SHORT_SHA}
+        Build ID: ${BUILD_ID}
+        Frontend: $(gcloud secrets versions access latest --secret=frontend-url)
+        API: $(gcloud secrets versions access latest --secret=api-url)
+        "
+        
+        # Send to Slack (if webhook URL is configured)
+        if gcloud secrets versions access latest --secret=slack-webhook-url 2>/dev/null; then
+          WEBHOOK_URL=$(gcloud secrets versions access latest --secret=slack-webhook-url)
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$MESSAGE\"}" \
+            $WEBHOOK_URL
+        else
+          echo "Slack webhook not configured. Skipping notification."
+        fi
+        
+        echo "Deployment completed successfully!"
+    waitFor: ['integration-tests']
+
+# Images to be pushed to Artifact Registry
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_FE_SERVICE_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_FE_SERVICE_NAME}:latest'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_API_SERVICE_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_API_SERVICE_NAME}:latest'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_WORKER_SERVICE_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_WORKER_SERVICE_NAME}:latest'
